@@ -1,14 +1,17 @@
 import queue
 import streamlit as st
 import pandas as pd
+import functools
+import streamlit.components.v1 as components
 from database.connection import SessionLocal
 from database.models import User, Student, Session, Attendance, QRCode
 from qr.generator import generate_student_qr
 from attendance.session_manager import close_session
 from components.blockchain_viewer import render_blockchain
 from streamlit_webrtc import webrtc_streamer
-from qr.scanner import QRScannerTransformer
-from attendance.recorder import record_attendance
+
+# IMPORT PROCESSOR DAN KONFIGURASI STUN SERVER DARI QR MODULE
+from qr.scanner import QRScannerTransformer, RTC_CONFIGURATION
 from qr.validator import decrypt_qr
 
 
@@ -143,13 +146,11 @@ def render():
                     st.warning(f"📋 **{s.mapel}** — Kelas {s.kelas}")
                     st.caption(f"⏰ {s.jam_mulai} — {s.jam_selesai} | Toleransi: {s.batas_terlambat_menit} menit")
 
-                    import functools
-                    import streamlit.components.v1 as components
-
-                    # ── Kamera WebRTC ──────────────────────────────────────
+                    # ── Kamera WebRTC (DENGAN FIX STUN CONFIGURATION) ──────
                     ctx = webrtc_streamer(
                         key=f"qr_cam_{s.id}",
                         video_processor_factory=functools.partial(QRScannerTransformer, session_id=s.id),
+                        rtc_configuration=RTC_CONFIGURATION,  # <-- INTEGRASI FIX ERROR TIMEOUT CLOUD
                         media_stream_constraints={"video": True, "audio": False},
                         async_processing=True,
                     )
@@ -158,29 +159,27 @@ def render():
                     if log_key not in st.session_state:
                         st.session_state[log_key] = []
 
-                    # 1. BACA QUEUE (Otomatis ter-refresh oleh script di bawah)
+                    # 1. BACA QUEUE (Menggunakan get_nowait tanpa loop while True yang menyumbat)
                     if ctx.video_processor:
                         try:
-                            while True:
-                                qr_raw, success, msg = ctx.video_processor.result_queue.get_nowait()
-                                
-                                from qr.validator import decrypt_qr
-                                payload = decrypt_qr(qr_raw)
-                                nama = payload.get("nama", "Tidak dikenal") if payload else "Tidak dikenal"
-                                
-                                st.session_state[log_key].insert(0, {
-                                    "nama": nama, "success": success, "msg": msg
-                                })
-                                # Popup notifikasi instan
-                                if success:
-                                    st.toast(f"✅ {nama} — HADIR/TERLAMBAT", icon="✅")
-                                else:
-                                    st.toast(f"❌ {nama} — {msg[:60]}", icon="❌")
+                            qr_raw, success, msg = ctx.video_processor.result_queue.get_nowait()
+                            
+                            payload = decrypt_qr(qr_raw)
+                            nama = payload.get("nama", "Tidak dikenal") if payload else "Tidak dikenal"
+                            
+                            st.session_state[log_key].insert(0, {
+                                "nama": nama, "success": success, "msg": msg
+                            })
+                            
+                            # Popup notifikasi instan ke layar Admin
+                            if success:
+                                st.toast(f"✅ {nama} — BERHASIL ABSEN", icon="✅")
+                            else:
+                                st.toast(f"❌ {nama} — {msg[:60]}", icon="❌")
                         except queue.Empty:
                             pass
 
-                    # 2. AUTO-REFRESH HACK (Menggantikan Tombol Sinkronisasi)
-                    # Tombol ini akan disembunyikan dan ditekan otomatis oleh Javascript setiap 2 detik
+                    # 2. AUTO-REFRESH HACK (Sinkronisasi Otomatis Via DOM Javascript)
                     st.button("♻️Sync", key=f"auto_sync_{s.id}")
                     components.html(
                         f"""
@@ -189,9 +188,9 @@ def render():
                         var btns = doc.querySelectorAll('button');
                         for(var i=0; i<btns.length; i++) {{
                             if(btns[i].innerText.includes('♻️Sync')) {{
-                                btns[i].style.display = 'none'; // Sembunyikan tombol
-                                // Auto-klik setiap 2 detik agar Streamlit me-refresh antrean (queue) UI
-                                setInterval((function(btn) {{ return function() {{ btn.click(); }} }})(btns[i]), 2000);
+                                btns[i].style.display = 'none'; // Sembunyikan tombol dari halaman UI
+                                // Auto-klik setiap 1.5 detik agar Streamlit me-refresh antrean (queue) UI
+                                setInterval((function(btn) {{ return function() {{ btn.click(); }} }})(btns[i]), 1500);
                             }}
                         }}
                         </script>
@@ -199,13 +198,14 @@ def render():
                     )
 
                     # 3. Tombol Tutup Sesi
+                    st.write("")
                     if st.button("🔒 Tutup Sesi & Rekap Absen", key=f"close_{s.id}",
                                  type="primary", use_container_width=True):
                         close_session(db, s.id)
                         st.success("✅ Sesi ditutup. Lihat rekap di tab **Rekap Absensi**.")
                         st.rerun()
 
-                    # 4. Tampilkan daftar hadir live
+                    # 4. Tampilkan daftar hadir live langsung dari DB Supabase
                     attended = db.query(Attendance).filter_by(session_id=s.id).all()
                     if attended:
                         st.markdown(f"**Sudah Scan ({len(attended)} siswa):**")
