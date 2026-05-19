@@ -1,0 +1,1 @@
+-- Dikelola secara otomatis oleh SQLAlchemy Base.metadata.create_all(bind=engine) di app.py
